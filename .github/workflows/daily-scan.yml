@@ -1,0 +1,59 @@
+name: 每日选股扫描
+
+on:
+  schedule:
+    - cron: '0 1 * * 1-5'    # 北京时间 9:00 = UTC 1:00，周一到周五
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: '调试模式（打印更多信息）'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: stock-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+      
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: 安装依赖
+        run: |
+          pip install --upgrade pip
+          # scanner 只用标准库，不需要额外依赖
+      
+      - name: 执行选股扫描
+        env:
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          STOCK_LIST: ${{ vars.STOCK_LIST }}
+        run: |
+          echo "⏰ $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
+          echo "📊 九天·财神 选股扫描启动"
+          echo ""
+          
+          if [ "${{ github.event.inputs.debug }}" = "true" ]; then
+            python3 scanner_http.py --debug
+          else
+            python3 scanner_http.py
+          fi
+      
+      - name: 上传报告
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 扫描报告-${{ github.run_number }}
+          path: |
+            scan_*.txt
+          retention-days: 7
