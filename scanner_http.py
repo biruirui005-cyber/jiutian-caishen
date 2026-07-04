@@ -2,7 +2,7 @@
 """
 九天·财神 — 选股扫描引擎 v3.0（HTTP API版）
 给客户用的：零依赖，GitHub Actions 上跑，不用 WSL 不用 mootdx
-数据源：东方财富 push2 HTTP API
+数据源：akshare（东方财富数据，稳定可靠）
 
 用法：
     python3 scanner_http.py                     # 全量扫描+打印报告
@@ -41,159 +41,109 @@ def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-# ==================== HTTP 工具 ====================
-def http_get(url, timeout=10):
-    """带重试的 HTTP GET"""
-    for attempt in range(3):
-        try:
-            req = urllib.request.Request(url, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Referer': 'https://quote.eastmoney.com/',
-            })
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = resp.read().decode('utf-8')
-                if data.startswith('jQuery'):
-                    data = data[data.index('(')+1:data.rindex(')')]
-                return json.loads(data)
-        except Exception as e:
-            if attempt < 2:
-                time.sleep(1)
-                continue
-            raise
-
-
-# ==================== 数据获取 ====================
+# ==================== 数据获取（akshare） ====================
 def fetch_all_stocks():
     """
-    从东方财富获取全市场 A 股行情
-    用 fs 参数分市场获取：深市主板+创业板+沪市主板+科创板
+    用 akshare 获取全市场 A 股实时行情（东方财富数据源）
+    akshare 自带重试和编码处理，GitHub Actions 上稳定可靠
     """
-    log("获取全市场 A 股行情...")
-    
-    # 东财 fs 过滤参数
-    markets = [
-        'm:0+t:6',    # 深市主板
-        'm:0+t:80',   # 创业板
-        'm:1+t:2',    # 沪市主板
-        'm:1+t:23',   # 科创板
-    ]
-    fs = ','.join(markets)
-    
-    all_items = []
-    page = 1
-    
-    while True:
-        url = (
-            f"https://push2.eastmoney.com/api/qt/clist/get"
-            f"?cb=&pn={page}&pz=500&po=1&np=1"
-            f"&ut=bd1d9ddb04089700cf9c27f6f7426281"
-            f"&fltt=2&invt=2&fid=f3&fs={fs}"
-            f"&fields=f12,f14,f2,f3,f4,f5,f6,f15,f17,f18,f20,f21"
-        )
-        
-        try:
-            result = http_get(url)
-        except Exception as e:
-            log(f"  请求失败: {e}")
-            break
-        
-        data = result.get('data', {})
-        if not data or 'diff' not in data or not data['diff']:
-            break
-        
-        items = data['diff']
-        all_items.extend(items)
-        
-        total = data.get('total', 0)
-        log(f"  第{page}页: {len(items)}只 (累计{len(all_items)}/{total})")
-        
-        if len(all_items) >= total:
-            break
-        
-        page += 1
-        time.sleep(0.3)
-    
-    log(f"  总计获取: {len(all_items)}只")
-    return all_items
-
-
-def parse_stock(item):
-    """解析东财返回的单个股票数据"""
+    log("获取全市场 A 股行情（akshare）...")
     try:
-        code = str(item.get('f12', '')).zfill(6)
-        name = str(item.get('f14', ''))
-        
-        # 过滤前缀
-        if not any(code.startswith(p) for p in VALID_PREFIXES):
-            return None
-        
-        # 过滤 ST
-        if EXCLUDE_ST and ('ST' in name or '*ST' in name):
-            return None
-        
-        price = item.get('f2')  # 最新价
-        if price is None or price == '-':
-            return None
-        price = float(price)
-        
-        if price < MIN_PRICE:
-            return None
-        
-        volume = item.get('f5', 0)  # 成交量（手）
-        if volume == '-':
-            return None
-        volume = float(volume)
-        if volume < MIN_VOLUME:
-            return None
-        
-        change_pct = item.get('f3', 0)  # 涨跌幅
-        if change_pct == '-':
-            return None
-        change_pct = float(change_pct)
-        
-        # 排除涨停/跌停
-        if change_pct >= 9.5:
-            return None
-        if change_pct <= -7:
-            return None
-        
-        amount = item.get('f6', 0)  # 成交额
-        if amount == '-':
-            amount = 0
-        amount = float(amount)
-        
-        high = item.get('f15', 0)
-        low = item.get('f16', 0)
-        open_price = item.get('f17', 0)
-        pre_close = item.get('f18', 0)
-        
-        if high == '-': high = 0
-        if low == '-': low = 0
-        if open_price == '-': open_price = 0
-        if pre_close == '-': pre_close = 0
-        
-        high = float(high)
-        low = float(low) if low else price
-        open_price = float(open_price) if open_price else price
-        pre_close = float(pre_close) if pre_close and pre_close != '-' else price
-        
-        return {
-            'code': code,
-            'name': name,
-            'market': 'SH' if code.startswith(('6', '9')) else 'SZ',
-            'price': price,
-            'pre_close': pre_close,
-            'volume': volume,
-            'change_pct': change_pct,
-            'amount': amount,
-            'open': open_price,
-            'high': high,
-            'low': low,
-            'turnover': item.get('f20', 0),  # 换手率
-            'pe': item.get('f21', 0),  # 动态市盈率
-        }
-    except (ValueError, TypeError):
-        return None
+        import akshare as ak
+    except ImportError:
+        log("❌ 需要安装 akshare: pip install akshare")
+        return []
+    
+    try:
+        df = ak.stock_zh_a_spot_em()
+        log(f"  获取到 {len(df)} 只股票")
+        return df
+    except Exception as e:
+        log(f"  请求失败: {e}")
+        return []
+
+
+def parse_stock(df):
+    """解析 akshare DataFrame 返回的股票数据"""
+    candidates = []
+    total = len(df)
+    
+    for idx, row in df.iterrows():
+        try:
+            code = str(row.get('代码', '')).zfill(6)
+            name = str(row.get('名称', ''))
+            
+            # 过滤前缀
+            if not any(code.startswith(p) for p in VALID_PREFIXES):
+                continue
+            
+            # 过滤 ST
+            if EXCLUDE_ST and ('ST' in name or '*ST' in name):
+                continue
+            
+            price = row.get('最新价', 0)
+            if price == '-' or price is None or price == 0:
+                continue
+            price = float(price)
+            if price < MIN_PRICE:
+                continue
+            
+            volume = row.get('成交量', 0)  # 手
+            if volume == '-':
+                continue
+            volume = float(volume)
+            if volume < MIN_VOLUME:
+                continue
+            
+            change_pct = row.get('涨跌幅', 0)
+            if change_pct == '-':
+                continue
+            change_pct = float(change_pct)
+            
+            # 排除涨停/跌停
+            if change_pct >= 9.5:
+                continue
+            if change_pct <= -7:
+                continue
+            
+            amount = row.get('成交额', 0)
+            if amount == '-':
+                amount = 0
+            amount = float(amount)
+            
+            high = float(row.get('最高', 0) or 0)
+            low = float(row.get('最低', 0) or 0)
+            open_price = float(row.get('今开', 0) or 0)
+            pre_close = float(row.get('昨收', 0) or 0)
+            turnover = row.get('换手率', 0)
+            if turnover == '-':
+                turnover = 0
+            turnover = float(turnover)
+            pe = row.get('市盈率-动态', 0)
+            if pe == '-':
+                pe = 0
+            pe = float(pe)
+            
+            candidates.append({
+                'code': code,
+                'name': name,
+                'market': 'SH' if code.startswith(('6', '9')) else 'SZ',
+                'price': price,
+                'pre_close': pre_close,
+                'volume': volume,
+                'change_pct': change_pct,
+                'amount': amount,
+                'open': open_price,
+                'high': high,
+                'low': low,
+                'turnover': turnover,
+                'pe': pe,
+            })
+        except (ValueError, TypeError):
+            continue
+    
+    log(f"  通过筛选: {len(candidates)}/{total}")
+    return candidates
 
 
 # ==================== 多因子打分 ====================
